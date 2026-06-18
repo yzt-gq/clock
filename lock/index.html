@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>粒子时钟</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #d1cbd5; 
+            font-family: sans-serif;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            cursor: pointer;
+        }
+        .tip {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #555;
+            font-size: 14px;
+            pointer-events: none;
+            opacity: 0.7;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="clockCanvas"></canvas>
+    <div class="tip">点击屏幕可以暂停/继续动画</div>
+
+    <script>
+        const canvas = document.getElementById('clockCanvas');
+        const ctx = canvas.getContext('2d');
+        let animationId;
+        let isAnimating = false;
+        
+        // 使用二维数组按字符位存储粒子，共8位 (HH:MM:SS 包含冒号)
+        let particleGroups = [[], [], [], [], [], [], [], []];
+        let lastChars = ['', '', '', '', '', '', '', ''];
+        let slotX = []; // 存储每个字符的中心X坐标
+        
+        // 粒子参数配置
+        const gap = 7; // 像素采样间隔，越小粒子越密集
+        const particleRadius = 4; // 粒子基础半径
+        
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            lastChars = ['', '', '', '', '', '', '', '']; // 调整窗口大小时强制重新生成
+            calculateSlots();
+        }
+
+        // 计算每个字符的固定位置，防止数字变化时其他数字发生位移
+        function calculateSlots() {
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d');
+            const fontSize = Math.min(canvas.width / 5.5, 250);
+            tempCtx.font = `bold ${fontSize}px "Arial Rounded MT Bold", "Helvetica Neue", Helvetica, Arial, sans-serif`;
+            
+            const w = tempCtx.measureText('0').width; // 数字的基准宽度
+            const cw = tempCtx.measureText(':').width; // 冒号的宽度
+            
+            const spacing = w * 0.15; // 数字间的间距
+            const colonSpacing = w * 0.25; // 冒号前后的间距
+            
+            // 8个槽位的宽度和后缀间距
+            const widths = [w, w, cw, w, w, cw, w, w];
+            const spaces = [spacing, colonSpacing, colonSpacing, spacing, colonSpacing, colonSpacing, spacing, 0];
+            
+            let totalWidth = 0;
+            for (let i = 0; i < 8; i++) {
+                totalWidth += widths[i] + spaces[i];
+            }
+            
+            let currentX = canvas.width / 2 - totalWidth / 2;
+            slotX = [];
+            for (let i = 0; i < 8; i++) {
+                slotX.push(currentX + widths[i] / 2);
+                currentX += widths[i] + spaces[i];
+            }
+        }
+
+        window.addEventListener('resize', resize);
+        resize();
+
+        // 粒子类
+        class Particle {
+            constructor(targetX, targetY, startX, startY) {
+                // 如果指定了初始坐标则从指定坐标开始，否则全屏随机
+                this.x = startX !== undefined ? startX : Math.random() * canvas.width;
+                this.y = startY !== undefined ? startY : Math.random() * canvas.height;
+                this.targetX = targetX;
+                this.targetY = targetY;
+                // 随机初始速度
+                this.vx = (Math.random() - 0.5) * 10;
+                // 随机初始速度
+                this.vy = (Math.random() - 0.5) * 10;
+                this.radius = particleRadius + Math.random() * 2.5; // 随机半径大小
+                this.friction = 0.82; // 摩擦力
+                this.ease = 0.12;     // 缓动系数
+                
+                // 随机深灰色，带一点透明度，模拟毛绒/烟雾边缘效果
+                const shade = Math.floor(Math.random() * 40 + 40);
+                this.color = `rgba(${shade}, ${shade}, ${shade}, ${Math.random() * 0.4 + 0.3})`;
+            }
+            
+            update() {
+                let dx = this.targetX - this.x;
+                let dy = this.targetY - this.y;
+                
+                // 增加一点随机抖动，让粒子看起来是活的 (未变动的字也会有微小的烟雾感)
+                dx += (Math.random() - 0.5) * 1.5;
+                dy += (Math.random() - 0.5) * 1.5;
+
+                this.vx += dx * this.ease;
+                this.vy += dy * this.ease;
+                this.vx *= this.friction;
+                this.vy *= this.friction;
+                this.x += this.vx;
+                this.y += this.vy;
+            }
+            
+            draw(ctx) {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.fill();
+            }
+        }
+
+        // 获取单个字符的像素坐标
+        function getCharPixels(char, xCenter, yCenter) {
+            const tempCanvas = document.createElement('canvas');
+            const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
+            tempCanvas.width = canvas.width;
+            tempCanvas.height = canvas.height;
+            //绘制字符
+            tempCtx.fillStyle = 'black';
+            const fontSize = Math.min(canvas.width / 5.5, 250);
+            tempCtx.font = `bold ${fontSize}px "Arial Rounded MT Bold", "Helvetica Neue", Helvetica, Arial, sans-serif`;
+            tempCtx.textAlign = 'center';
+            tempCtx.textBaseline = 'middle';
+            tempCtx.fillText(char, xCenter, yCenter);
+            // 获取字符的像素数据
+            const imgData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+            const pixels = imgData.data;
+            const positions = [];
+
+            // 仅扫描字符所在的大致区域，提升性能
+            const boxSize = fontSize * 1.5;
+            const startX = Math.max(0, Math.floor(xCenter - boxSize / 2));
+            const endX = Math.min(tempCanvas.width, Math.ceil(xCenter + boxSize / 2));
+            const startY = Math.max(0, Math.floor(yCenter - boxSize / 2));
+            const endY = Math.min(tempCanvas.height, Math.ceil(yCenter + boxSize / 2));
+
+            // 扫描字符所在区域，获取非透明像素坐标
+            for (let y = startY; y < endY; y += gap) {
+                for (let x = startX; x < endX; x += gap) {
+                    const index = (y * tempCanvas.width + x) * 4;
+                    const alpha = pixels[index + 3];
+                    if (alpha > 128) {
+                        positions.push({ x, y });
+                    }
+                }
+            }
+            return positions;
+        }
+
+        // 更新粒子目标位置
+        function updateParticles() {
+            const now = new Date();
+            const h = String(now.getHours()).padStart(2, '0');
+            const m = String(now.getMinutes()).padStart(2, '0');
+            const s = String(now.getSeconds()).padStart(2, '0');
+            
+            const chars = [h[0], h[1], ':', m[0], m[1], ':', s[0], s[1]];
+            const yCenter = canvas.height / 2;
+            
+            // 按字符位进行比对
+            for (let i = 0; i < 8; i++) {
+                if (chars[i] !== lastChars[i]) {
+                    lastChars[i] = chars[i]; // 更新记录的字符
+                    
+                    const newPositions = getCharPixels(chars[i], slotX[i], yCenter);
+                    
+                    // 打乱该字符组的目标位置，让粒子在数字切换时飞行的轨迹更交叉
+                    newPositions.sort(() => Math.random() - 0.5);
+                    
+                    let group = particleGroups[i];
+
+                    for (let j = 0; j < newPositions.length; j++) {
+                        if (j < group.length) {
+                            // 复用已有粒子，更新目标位置
+                            group[j].targetX = newPositions[j].x;
+                            group[j].targetY = newPositions[j].y;
+                        } else {
+                            // 粒子不够则新增，并从该字符的中心点附近散开
+                            const startX = slotX[i] + (Math.random() - 0.5) * 40;
+                            const startY = yCenter + (Math.random() - 0.5) * 40;
+                            group.push(new Particle(newPositions[j].x, newPositions[j].y, startX, startY));
+                        }
+                    }
+                    
+                    // 如果粒子多余，则移除多余的粒子
+                    if (newPositions.length < group.length) {
+                        group.splice(newPositions.length);
+                    }
+                }
+            }
+        }
+
+        // 绘制渐变背景,覆盖之前得绘制痕迹
+        function drawBackground() {
+            const gradient = ctx.createRadialGradient(
+                canvas.width / 2, canvas.height / 2, 0,
+                canvas.width / 2, canvas.height / 2, canvas.width / 1.2
+            );
+            gradient.addColorStop(0, '#eeeaf0');
+            gradient.addColorStop(1, '#aba1b3');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        // 主动画循环
+        function animate() {
+            updateParticles();
+            drawBackground();
+            // 开启轻微的阴影，让粒子融合得更像毛绒/烟雾
+            ctx.shadowColor = 'rgba(60, 60, 60, 0.4)';
+            ctx.shadowBlur = 3;
+
+            // 渲染所有组的粒子
+            for (let i = 0; i < 8; i++) {
+                particleGroups[i].forEach(p => {
+                    p.update();
+                    p.draw(ctx);
+                });
+            }
+            
+            ctx.shadowBlur = 0; // 重置阴影
+
+            animationId = requestAnimationFrame(animate);
+        }
+
+        // 启动动画
+        function start() {
+            if (!isAnimating) {
+                isAnimating = true;
+                animate();
+                drawBackground();
+            }
+        }
+
+        // 停止动画
+        function stop() {
+            if (isAnimating) {
+                cancelAnimationFrame(animationId);
+                isAnimating = false;
+            }
+        }
+
+        start();
+
+        // 点击画布实现暂停和恢复
+        canvas.addEventListener('click', () => {
+            if (isAnimating) {
+                stop();
+            } else {
+                start();
+            }
+        });
+    </script>
+</body>
+</html>
